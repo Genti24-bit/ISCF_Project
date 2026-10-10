@@ -1,0 +1,7 @@
+# data is large (~200 MB processed, ~235 MB raw) -> do not commit
+*.npz
+*.npy
+Raw data/
+data/
+__pycache__/
+.ipynb_checkpoints/

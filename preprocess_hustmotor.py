@@ -78,7 +78,7 @@ def block_windows(sig: np.ndarray, win: int, per_block: int) -> np.ndarray:
 
 
 
-def find_raw_dir(raw_dir):
+def find_raw_dir(raw_dir: Path) -> Path:
     """Locate the folder that really contains H_5HZ.txt (searches sub-folders too)."""
     raw_dir = Path(raw_dir)
     if (raw_dir / "H_5HZ.txt").exists():
@@ -87,7 +87,11 @@ def find_raw_dir(raw_dir):
     if hits:
         print(f"[info] raw files found in: {hits[0].parent}")
         return hits[0].parent
-    raise SystemExit(f"Could not find H_5HZ.txt in or under: {raw_dir.resolve()}")
+    raise SystemExit(
+        f"\nCould not find H_5HZ.txt in or under: {raw_dir.resolve()}\n"
+        "Check that you unzipped Raw_data.zip and pass the folder that holds the 24 .txt files,\n"
+        "e.g.  --raw_dir \"C:\\Users\\you\\Desktop\\My Project\\Raw data\"\n"
+        "Tip: run  dir /s /b H_5HZ.txt  (Windows) to see where the file really is.")
 
 # --------------------------------------------------------------------------- main
 def main():
@@ -98,7 +102,7 @@ def main():
     ap.add_argument("--n_per_file", type=int, default=1000, help="samples per (state, speed)")
     ap.add_argument("--vib_channel", choices=list(CHAN), default="X",
                     help="vibration axis. Z is NOT recommended (see README).")
-    ap.add_argument("--norm", choices=["zscore", "minmax", "center", "none"], default="zscore")
+    ap.add_argument("--norm", choices=["zscore", "rms", "minmax", "center", "none"], default="zscore")
     ap.add_argument("--split", choices=["block", "random"], default="block",
                     help="block: blocks 0-3 train / block 4 test (no overlap leakage, 800/200). "
                          "random: random 800/200 as in the paper (overlapping windows can leak).")
@@ -111,6 +115,7 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     V, A, Y, D, B, W, S = [], [], [], [], [], [], []
+    RV, RA, DV, DA, ST = [], [], [], [], []   # raw per-window RMS / DC (before normalisation) + start index
     for c_idx, cname in enumerate(CLASSES):
         for hz, d_idx in SPEEDS.items():
             f = args.raw_dir / f"{cname}_{hz}HZ.txt"
@@ -124,16 +129,32 @@ def main():
             else:
                 split = np.zeros(n, np.int8)
                 split[rng.permutation(n)[: int(0.2 * n)]] = 1
-            V.append(normalise(vib, args.norm)); A.append(normalise(aco, args.norm))
+            rms_ = lambda x: x.astype(np.float64).std(1).astype(np.float32)   # RMS after removing DC
+            RV.append(rms_(vib)); RA.append(rms_(aco))
+            DV.append(vib.mean(1).astype(np.float32)); DA.append(aco.mean(1).astype(np.float32))
+            st = np.round(np.linspace(0, BLOCK - args.win, per_block)).astype(np.int32)
+            ST.append(np.tile(st, N_BLOCKS) + np.repeat(np.arange(N_BLOCKS), per_block) * BLOCK)  # row index in raw file
+            if args.norm == "rms":      # centre each window, scale later by ONE channel-wide RMS (amplitude preserved)
+                V.append(normalise(vib, "center")); A.append(normalise(aco, "center"))
+            else:
+                V.append(normalise(vib, args.norm)); A.append(normalise(aco, args.norm))
             Y.append(np.full(n, c_idx, np.int8)); D.append(np.full(n, d_idx, np.int8))
             B.append(blk.astype(np.int8)); W.append(np.tile(np.arange(per_block), N_BLOCKS).astype(np.int16))
             S.append(split)
             print(f"{f.name:18s} -> {n} samples  (train {int((split==0).sum())} / test {int((split==1).sum())})")
 
+    if args.norm == "rms":
+        trn = np.concatenate(S) == 0                      # statistics from TRAIN-split windows only
+        Vc, Ac = np.concatenate(V), np.concatenate(A)
+        gv = np.sqrt((Vc[trn].astype(np.float64) ** 2).mean()); ga = np.sqrt((Ac[trn].astype(np.float64) ** 2).mean())
+        V, A = [Vc / gv], [Ac / ga]
+        print(f"channel-wide RMS used: vib={gv:.5f} ac={ga:.5f}")
     np.savez(args.out,
              vib=np.concatenate(V), ac=np.concatenate(A), y=np.concatenate(Y),
              domain=np.concatenate(D), block=np.concatenate(B), win=np.concatenate(W),
              split=np.concatenate(S),
+             rms_v=np.concatenate(RV), rms_a=np.concatenate(RA), dc_v=np.concatenate(DV), dc_a=np.concatenate(DA),
+             start=np.concatenate(ST),
              classes=np.array(CLASSES), domains=np.array(["B1_5Hz", "B2_10Hz", "B3_20Hz", "B4_30Hz"]),
              meta=np.array([f"win={args.win}", f"vib={args.vib_channel}", f"norm={args.norm}",
                             f"split={args.split}", f"fs={FS}"]))

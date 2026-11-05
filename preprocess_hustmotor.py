@@ -66,6 +66,7 @@ def normalise(w: np.ndarray, mode: str) -> np.ndarray:
     raise ValueError(mode)
 
 
+
 # ---------------------------------------------------------------------- windowing
 def block_windows(sig: np.ndarray, win: int, per_block: int) -> np.ndarray:
     """sig: (163840,) -> (5*per_block, win). Windows are evenly spaced INSIDE each block."""
@@ -162,18 +163,37 @@ def main():
 
 
 # ------------------------------------------------- helper for the 4 DG tasks (Table 4)
-def load_dg_task(npz_path, target_domain: int, eval_on="test"):
+def load_dg_task(npz_path, target_domain: int, eval_on="test", norm="zscore"):
     """Leave-one-domain-out. target_domain 0..3 == Task 9..12 (B1..B4).
     Returns dict of (vib, ac, y) for source-train, source-val(test split) and unseen target.
-    eval_on: 'test' (200/class, as in paper) or 'all' (1000/class)."""
+    eval_on: 'test' (200/class, as in paper) or 'all' (1000/class).
+
+    norm: 'zscore' (default) -> signals exactly as stored (per-window z-score, no leakage possible).
+          'rms'    -> amplitude-preserving: DC removed, then divided by ONE RMS per channel that is
+                      computed ONLY from this task's source-train windows (the unseen speed and the
+                      source val/test windows never influence it). Needs a v1.1 file (rms_v / rms_a).
+    The scales used are returned as t["scale"] = (vib_scale, ac_scale) (None for zscore); report them.
+    """
     d = np.load(npz_path)
     src = d["domain"] != target_domain
     tgt = ~src
     tr = src & (d["split"] == 0)
     va = src & (d["split"] == 1)
     te = tgt & ((d["split"] == 1) if eval_on == "test" else True)
-    pack = lambda m: (d["vib"][m], d["ac"][m], d["y"][m])
-    return {"train": pack(tr), "val": pack(va), "target": pack(te), "train_domains": d["domain"][tr]}
+    vib, ac, scale = d["vib"], d["ac"], None
+    if norm == "rms":
+        if "rms_v" not in d.files:
+            raise ValueError("norm='rms' needs a v1.1 file (with rms_v / rms_a); use hustmotor_1024_v1.1.npz")
+        # z-score stored (w-mean)/std and rms_* is std, so vib*rms_v is the DC-removed signal in original units
+        vib = vib * d["rms_v"][:, None]
+        ac = ac * d["rms_a"][:, None]
+        sv = float(np.sqrt((vib[tr].astype(np.float64) ** 2).mean()))
+        sa = float(np.sqrt((ac[tr].astype(np.float64) ** 2).mean()))
+        vib, ac, scale = vib / sv, ac / sa, (sv, sa)
+    elif norm != "zscore":
+        raise ValueError("norm must be 'zscore' or 'rms'")
+    pack = lambda m: (vib[m], ac[m], d["y"][m])
+    return {"train": pack(tr), "val": pack(va), "target": pack(te), "train_domains": d["domain"][tr], "scale": scale}
 
 
 if __name__ == "__main__":

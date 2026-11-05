@@ -3,8 +3,9 @@
 Repo: https://github.com/Genti24-bit/ISCF_Project
 Paper: Zhao et al., *Multimodal unified generalization and translation network...*, EAAI 162 (2025) 112559
 
-**Current data version: v1.1.** Default file for the whole team: `hustmotor_1024_v1.1.npz`.
-It has the same signals as v1.0, plus the extra arrays `rms_v`, `rms_a`, `dc_v`, `dc_a`, `start` (see section 9).
+**Current data version: v1.1 data file, v1.2 code.** Default file for the whole team: `hustmotor_1024_v1.1.npz`.
+It has the same signals as v1.0, plus the extra arrays `rms_v`, `rms_a`, `dc_v`, `dc_a`, `start` (section 9).
+v1.2 adds the leak-free `norm="rms"` option to `load_dg_task` (section 10). Code-only change, no new data file.
 `load_dg_task` works unchanged with every file listed in the README.
 
 ## 1. Setup (5 minutes)
@@ -19,7 +20,7 @@ Download `hustmotor_1024_v1.1.npz` from **GitHub -> Releases -> v1.1** and put i
 
 ```bash
 sha256sum hustmotor_1024_v1.1.npz    # must be: b73efa9973af72b4a1b91fd5c54acc7035b082577df66b990ab0e6340624f986
-python check_v11.py                  # must end with: same as v1.0 data: True  (only if you also have the v1.0 file)
+python check_v11.py                  # optional: only works if you also have the v1.0 file
 ```
 (Windows without Git Bash: `certutil -hashfile hustmotor_1024_v1.1.npz SHA256`)
 
@@ -119,15 +120,15 @@ Adam, 50 epochs, batch size 256, learning rate `0.0005 / (1 + 10*p)**0.75` with 
 - UNBAL at 5 Hz has a noisier acoustic signal than the other classes at 5 Hz. If that class is suspiciously easy on Task 9, this is probably why.
 - The paper does not say which vibration axis it used. We use **X**.
 - Samples within one recording overlap (stride about 159 of 1024 points). Train/val/test never share a recording block, so there is no leakage, but nearby training samples are very similar.
-- `hustmotor_1024_rms.npz` keeps relative amplitude between windows (see section 9). Use it only after the team agrees; the default stays the z-score file.
+- Amplitude-preserving RMS normalisation is available through `load_dg_task(..., norm="rms")` (section 10). Do NOT use the old `hustmotor_1024_rms.npz`; its scale was computed from all four speeds. Use it only after the team agrees; the default stays z-score.
 
 ## 8. Quick sanity check for your model
 
 A model that always guesses gets **16.7 %** (6 classes). If your unseen-speed accuracy is below ~30 %, something is wrong with the pipeline (labels not int64, wrong array, normalised twice) before it is a modelling problem. For reference, the paper reports (Scenario 1, motor): vibration-only baseline ~68 %, acoustic-only ~50 %, proposed MUGTN ~78 % average.
 
-## 9. v1.1 extra arrays (for error analysis and plotting)
+## 9. Extra arrays (since v1.1) (for error analysis and plotting)
 
-Every v1.1 file contains these arrays, one value per sample (24,000 in total):
+Every v1.1+ file contains these arrays, one value per sample (24,000 in total):
 
 | Array | Meaning |
 |---|---|
@@ -148,3 +149,18 @@ rms_v, rms_a, start, y = d["rms_v"][mask], d["rms_a"][mask], d["start"][mask], d
 
 Typical use: after predicting, find test samples where one modality fails and compare their `rms_v` / `rms_a`
 (is the sound weak? is the vibration quiet?). Use `start` to plot the original signal from the raw file.
+
+## 10. Amplitude-preserving RMS normalisation (v1.2, leak-free)
+
+Z-score gives every window RMS = 1, so loud and quiet windows look the same. `norm="rms"` keeps the relative amplitude:
+each window has its DC offset removed, then ALL windows of a channel are divided by one RMS value.
+
+```python
+t = load_dg_task("hustmotor_1024_v1.1.npz", target_domain=0, norm="rms")
+print(t["scale"])        # (vibration scale, acoustic scale) used for this task: report these
+```
+
+- The scale is computed **per task, from the source-train windows only**. The unseen speed and the source val windows never influence it.
+- It works on any v1.1+ file (the loader rebuilds the DC-removed signal from `rms_v` / `rms_a`). No extra download.
+- Expect the unseen target to be on a different scale than training (Task 12: about 4x louder; Task 9: about 0.08x). That is the real domain gap, not a bug.
+- Default is still `norm="zscore"`. Write "data v1.1, code v1.2, norm=rms" next to results that use it.

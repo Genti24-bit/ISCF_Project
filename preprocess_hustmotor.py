@@ -67,6 +67,31 @@ def normalise(w: np.ndarray, mode: str) -> np.ndarray:
 
 
 
+# ----------------------------------------------------------- time-domain features
+FEAT_NAMES = ["rms", "var", "peak", "crest", "kurtosis", "clearance", "shape",
+              "line_integral", "peak2peak", "skewness", "impulse"]   # Tran et al., Mathematics 12 (2024) 1569, Table 2
+
+
+def time_features(w: np.ndarray) -> np.ndarray:
+    """w: (n, 1024) raw windows -> (n, 11) features, computed on the DC-removed window.
+    Standard definitions (kurtosis = 4th central moment / var^2, NOT excess)."""
+    x = w.astype(np.float64)
+    x = x - x.mean(1, keepdims=True)
+    ax = np.abs(x)
+    eps = 1e-12
+    rms = np.sqrt((x ** 2).mean(1)); var = x.var(1); peak = ax.max(1)
+    mabs = ax.mean(1); msqrt = np.sqrt(ax).mean(1)
+    f = np.stack([
+        rms, var, peak, peak / (rms + eps),
+        (x ** 4).mean(1) / (var ** 2 + eps),
+        peak / (msqrt ** 2 + eps),
+        rms / (mabs + eps),
+        np.abs(np.diff(x, axis=1)).sum(1),
+        x.max(1) - x.min(1),
+        (x ** 3).mean(1) / (var ** 1.5 + eps),
+        peak / (mabs + eps)], axis=1)
+    return f.astype(np.float32)
+
 # ---------------------------------------------------------------------- windowing
 def block_windows(sig: np.ndarray, win: int, per_block: int) -> np.ndarray:
     """sig: (163840,) -> (5*per_block, win). Windows are evenly spaced INSIDE each block."""
@@ -116,6 +141,7 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     V, A, Y, D, B, W, S = [], [], [], [], [], [], []
+    FV, FA = [], []                           # 11 time-domain features per window (vib / acoustic)
     RV, RA, DV, DA, ST = [], [], [], [], []   # raw per-window RMS / DC (before normalisation) + start index
     for c_idx, cname in enumerate(CLASSES):
         for hz, d_idx in SPEEDS.items():
@@ -131,6 +157,7 @@ def main():
                 split = np.zeros(n, np.int8)
                 split[rng.permutation(n)[: int(0.2 * n)]] = 1
             rms_ = lambda x: x.astype(np.float64).std(1).astype(np.float32)   # RMS after removing DC
+            FV.append(time_features(vib)); FA.append(time_features(aco))
             RV.append(rms_(vib)); RA.append(rms_(aco))
             DV.append(vib.mean(1).astype(np.float32)); DA.append(aco.mean(1).astype(np.float32))
             st = np.round(np.linspace(0, BLOCK - args.win, per_block)).astype(np.int32)
@@ -156,6 +183,7 @@ def main():
              split=np.concatenate(S),
              rms_v=np.concatenate(RV), rms_a=np.concatenate(RA), dc_v=np.concatenate(DV), dc_a=np.concatenate(DA),
              start=np.concatenate(ST),
+             feat_v=np.concatenate(FV), feat_a=np.concatenate(FA), feat_names=np.array(FEAT_NAMES),
              classes=np.array(CLASSES), domains=np.array(["B1_5Hz", "B2_10Hz", "B3_20Hz", "B4_30Hz"]),
              meta=np.array([f"win={args.win}", f"vib={args.vib_channel}", f"norm={args.norm}",
                             f"split={args.split}", f"fs={FS}"]))
@@ -163,7 +191,7 @@ def main():
 
 
 # ------------------------------------------------- helper for the 4 DG tasks (Table 4)
-def load_dg_task(npz_path, target_domain: int, eval_on="test", norm="zscore"):
+def load_dg_task(npz_path, target_domain: int, eval_on="test", norm="zscore", features=False):
     """Leave-one-domain-out. target_domain 0..3 == Task 9..12 (B1..B4).
     Returns dict of (vib, ac, y) for source-train, source-val(test split) and unseen target.
     eval_on: 'test' (200/class, as in paper) or 'all' (1000/class).
@@ -173,7 +201,10 @@ def load_dg_task(npz_path, target_domain: int, eval_on="test", norm="zscore"):
                       computed ONLY from this task's source-train windows (the unseen speed and the
                       source val/test windows never influence it). Needs a v1.1 file (rms_v / rms_a).
     The scales used are returned as t["scale"] = (vib_scale, ac_scale) (None for zscore); report them.
-    """
+
+    features=True (needs a v1.3 file) additionally returns t["train_feat"], t["val_feat"], t["target_feat"],
+          each a tuple (vib_features (N,11), acoustic_features (N,11)), standardised (mean 0, std 1) with
+          statistics from THIS task's source-train windows only; t["feat_names"] lists the 11 columns."""
     d = np.load(npz_path)
     src = d["domain"] != target_domain
     tgt = ~src
@@ -193,7 +224,18 @@ def load_dg_task(npz_path, target_domain: int, eval_on="test", norm="zscore"):
     elif norm != "zscore":
         raise ValueError("norm must be 'zscore' or 'rms'")
     pack = lambda m: (vib[m], ac[m], d["y"][m])
-    return {"train": pack(tr), "val": pack(va), "target": pack(te), "train_domains": d["domain"][tr], "scale": scale}
+    out = {"train": pack(tr), "val": pack(va), "target": pack(te), "train_domains": d["domain"][tr], "scale": scale}
+    if features:
+        if "feat_v" not in d.files:
+            raise ValueError("features=True needs a v1.3 file (with feat_v / feat_a)")
+        fv, fa = d["feat_v"].astype(np.float64), d["feat_a"].astype(np.float64)
+        mv, sv_ = fv[tr].mean(0), fv[tr].std(0) + 1e-12
+        ma, sa_ = fa[tr].mean(0), fa[tr].std(0) + 1e-12
+        fv, fa = ((fv - mv) / sv_).astype(np.float32), ((fa - ma) / sa_).astype(np.float32)
+        for k, m in (("train", tr), ("val", va), ("target", te)):
+            out[k + "_feat"] = (fv[m], fa[m])
+        out["feat_names"] = [str(n) for n in d["feat_names"]]
+    return out
 
 
 if __name__ == "__main__":

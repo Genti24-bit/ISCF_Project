@@ -3,9 +3,9 @@
 Repo: https://github.com/Genti24-bit/ISCF_Project
 Paper: Zhao et al., *Multimodal unified generalization and translation network...*, EAAI 162 (2025) 112559
 
-**Current data version: v1.1 data file, v1.2 code.** Default file for the whole team: `hustmotor_1024_v1.1.npz`.
-It has the same signals as v1.0, plus the extra arrays `rms_v`, `rms_a`, `dc_v`, `dc_a`, `start` (section 9).
-v1.2 adds the leak-free `norm="rms"` option to `load_dg_task` (section 10). Code-only change, no new data file.
+**Current data version: v1.3.** Default file for the whole team: `hustmotor_1024_v1.3.npz`.
+It has the same signals as v1.0/v1.1, plus the extra arrays `rms_v`, `rms_a`, `dc_v`, `dc_a`, `start` (section 9) and 11 time-domain features per window (section 11).
+v1.2 = leak-free `norm="rms"` (section 10). Code-only change, same data.
 `load_dg_task` works unchanged with every file listed in the README.
 
 ## 1. Setup (5 minutes)
@@ -16,13 +16,13 @@ cd ISCF_Project
 pip install -r requirements.txt          # numpy only; install PyTorch yourself for models
 ```
 
-Download `hustmotor_1024_v1.1.npz` from **GitHub -> Releases -> v1.1** and put it in this folder. Then check:
+Download `hustmotor_1024_v1.3.npz` from **GitHub -> Releases -> v1.3** and put it in this folder. Then check:
 
 ```bash
-sha256sum hustmotor_1024_v1.1.npz    # must be: b73efa9973af72b4a1b91fd5c54acc7035b082577df66b990ab0e6340624f986
+sha256sum hustmotor_1024_v1.3.npz    # must be: 605a041d35aab9a12749d9f5f45580cca87e0b5b63b8330bcafdb215da3a8e7d
 python check_v11.py                  # optional: only works if you also have the v1.0 file
 ```
-(Windows without Git Bash: `certutil -hashfile hustmotor_1024_v1.1.npz SHA256`)
+(Windows without Git Bash: `certutil -hashfile hustmotor_1024_v1.3.npz SHA256`)
 
 If the hash differs, do not train. Re-download the file.
 
@@ -48,7 +48,7 @@ Total 24,000 samples = 6 states x 4 speeds x 1000. In the default file, signals 
 ```python
 from preprocess_hustmotor import load_dg_task
 
-t = load_dg_task("hustmotor_1024_v1.1.npz", target_domain=0)
+t = load_dg_task("hustmotor_1024_v1.3.npz", target_domain=0)
 
 Xv_tr, Xa_tr, y_tr = t["train"]    # train : 3 seen speeds, 800/class/speed -> 14400 samples
 Xv_va, Xa_va, y_va = t["val"]      # val   : same 3 seen speeds, other 200/class/speed -> 3600
@@ -110,10 +110,10 @@ Adam, 50 epochs, batch size 256, learning rate `0.0005 / (1 + 10*p)**0.75` with 
 ## 6. Rules. Please read.
 
 1. **Never touch the unseen speed (`t["target"]`) until the final evaluation.** No training, no early stopping, no choosing hyperparameters or the best epoch with it. Use `t["val"]` for that. (`val` comes from the seen speeds, so it is optimistic. That is fine. It is only for picking epochs.)
-2. **Do not change the split, normalisation or channel yourself.** Everyone uses `hustmotor_1024_v1.1.npz` (data v1.1). Want to try something else (channel Y, min-max, RMS)? Tell the owner so it becomes a new version for everybody.
+2. **Do not change the split, normalisation or channel yourself.** Everyone uses `hustmotor_1024_v1.3.npz` (data v1.3). Want to try something else (channel Y, min-max, RMS)? Tell the owner so it becomes a new version for everybody.
 3. **Do not use the vibration Z channel.** It is not in this file on purpose (it behaves differently for the healthy motor, which would leak the label).
 4. **Do not shuffle across `train` / `val` / `target`.** Shuffle inside the training set only.
-5. **Save a results table per task** (mean, std over 10 runs, seeds used) and write "data v1.1" next to it.
+5. **Save a results table per task** (mean, std over 10 runs, seeds used) and write "data v1.3" next to it.
 
 ## 7. Known data notes
 
@@ -140,7 +140,7 @@ Every v1.1+ file contains these arrays, one value per sample (24,000 in total):
 
 ```python
 import numpy as np
-d = np.load("hustmotor_1024_v1.1.npz")
+d = np.load("hustmotor_1024_v1.3.npz")
 target = 0                                                   # Task 9
 mask = (d["domain"] == target) & (d["split"] == 1)           # same rule as load_dg_task(..., eval_on="test")
 rms_v, rms_a, start, y = d["rms_v"][mask], d["rms_a"][mask], d["start"][mask], d["y"][mask]
@@ -156,11 +156,31 @@ Z-score gives every window RMS = 1, so loud and quiet windows look the same. `no
 each window has its DC offset removed, then ALL windows of a channel are divided by one RMS value.
 
 ```python
-t = load_dg_task("hustmotor_1024_v1.1.npz", target_domain=0, norm="rms")
+t = load_dg_task("hustmotor_1024_v1.3.npz", target_domain=0, norm="rms")
 print(t["scale"])        # (vibration scale, acoustic scale) used for this task: report these
 ```
 
 - The scale is computed **per task, from the source-train windows only**. The unseen speed and the source val windows never influence it.
 - It works on any v1.1+ file (the loader rebuilds the DC-removed signal from `rms_v` / `rms_a`). No extra download.
 - Expect the unseen target to be on a different scale than training (Task 12: about 4x louder; Task 9: about 0.08x). That is the real domain gap, not a bug.
-- Default is still `norm="zscore"`. Write "data v1.1, code v1.2, norm=rms" next to results that use it.
+- Default is still `norm="zscore"`. Write "data v1.3, norm=rms" next to results that use it.
+
+## 11. Time-domain features (v1.3): RMS and 10 others as model input or for error analysis
+
+Every window also has the 11 time-domain features of Tran et al., *Mathematics* 12 (2024) 1569, Table 2,
+for vibration (`feat_v`) and acoustic (`feat_a`), each of shape (24000, 11). Columns (`feat_names`):
+`rms, var, peak, crest, kurtosis, clearance, shape, line_integral, peak2peak, skewness, impulse`.
+They are computed on the raw window with its DC offset removed (so `rms` equals `rms_v` / `rms_a`). Kurtosis is the plain 4th-moment version (a Gaussian gives about 3).
+
+```python
+t = load_dg_task("hustmotor_1024_v1.3.npz", target_domain=0, features=True)
+Fv_tr, Fa_tr = t["train_feat"]     # (14400, 11) each, standardised
+Fv_te, Fa_te = t["target_feat"]    # (1200, 11) each
+print(t["feat_names"])
+```
+
+- Features are **standardised with mean/std of this task's source-train windows only** (same leak-free rule as `norm="rms"`). The unseen speed never influences them.
+- `features=False` (default) changes nothing: the call returns exactly what it returned before.
+- Raw, unstandardised features are in the file (`np.load(...)["feat_v"]`), for plotting and error analysis (for example: do the samples where sound fails have low acoustic `rms` or `kurtosis`?).
+- Use them as a separate input branch (as in the paper's "1D branch") next to the raw 1024-point signal, or on their own for a quick baseline (e.g. random forest).
+- Amplitude-type features (`rms`, `var`, `peak`, `peak2peak`, `line_integral`) grow strongly with speed, so on the unseen speed they fall outside the training range. Shape-type features (`crest`, `kurtosis`, `skewness`, `shape`, `clearance`, `impulse`) are scale-free and should transfer better. Comparing the two groups is a useful experiment.
